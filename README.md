@@ -1,2 +1,2 @@
 # area-extractor
-Extracts areas from a OSM pbf file as polygons
+Extracts areas from a OSM *.pbf file as polygons
