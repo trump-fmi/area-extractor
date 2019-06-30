@@ -1,97 +1,147 @@
 import geojson
+import math
 import osmium as o
 
-from geojson import Point, LineString, Feature, FeatureCollection
+from geojson import Point, LineString, Feature, FeatureCollection, Polygon
+
+DEBUG_RELATIONS_NUMBER = 1000
 
 
-
-class _AreaFilter(o.SimpleHandler):
+class _RelationFilter(o.SimpleHandler):
 
     def __init__(self):
-        super(_AreaFilter, self).__init__()
-        self.elements = []
-        self.requiredNodes = {}
-        self.wayCounter = 0
+        super(_RelationFilter, self).__init__()
+        self.relations = {}
+        self.wayReplacements = {}
+        self.relationsNumber = 0
 
     def way(self, w):
+        if 'type' not in w.tags: return
+        if not w.tags['type'] == 'boundary': return
         if 'admin_level' not in w.tags: return
         if not w.tags['admin_level'] == '8': return
 
-        # Build object
+    def relation(self, r):
+        if self.relationsNumber >= DEBUG_RELATIONS_NUMBER: return
+        if 'type' not in r.tags: return
+        if not r.tags['type'] == 'boundary': return
+        if 'admin_level' not in r.tags: return
+        if not r.tags['admin_level'] == '8': return
+        if not r.visible: return
+
         element = {
-            'type': 'way',
-            'id': w.id,
-            'nodes': [None] * len(w.nodes)
+            'id': r.id,
+            'ways': {}
         }
 
-        self.elements.append(element)
+        for m in r.members:
+            if m.role == 'outer' and m.type == 'w':
+                element['ways'][m.ref] = []
+                if m.ref in self.wayReplacements:
+                    self.wayReplacements[m.ref].append(r.id)
+                else:
+                    self.wayReplacements[m.ref] = [r.id]
 
-        nodeIndex = 0
-        for n in w.nodes:
+            elif m.role == 'admin_centre' and m.type == 'n':
+                element['centre'] = m.ref
 
-            replaceInfo = {
-                'element': element,
-                'index': nodeIndex
-            }
+        self.relations[r.id] = element
+        self.relationsNumber += 1
 
-            if n in self.requiredNodes:
-                self.requiredNodes[n.ref].append(replaceInfo)
+
+class _WayFilter(o.SimpleHandler):
+
+    def __init__(self, relations, wayReplacements):
+        super(_WayFilter, self).__init__()
+        self.relations = relations
+        self.wayReplacements = wayReplacements
+        self.additionalWays = {}
+
+    def way(self, w):
+        if w.id in self.wayReplacements:
+            for i, relationId in enumerate(self.wayReplacements[w.id]):
+                self.relations[relationId]['ways'][w.id] = self.createCoordinatesList(w.nodes)
+        elif 'admin_level' in w.tags and w.tags['admin_level'] == '8':
+            self.additionalWays[w.id] = self.createCoordinatesList(w.nodes)
+
+    def createCoordinatesList(self, wayNodes):
+        coordinatesList = []
+        for node in wayNodes:
+            location = node.location
+            coordinatesList.append((location.lon, location.lat))
+
+        return coordinatesList
+
+
+def easifyWays(relationWays):
+    while True:
+        changed = False
+        for wayId1, way1 in relationWays.items():
+            if (len(way1)) < 2:
+                del relationWays[wayId1]
+                changed = True
+                break
+
+            endNode1 = way1[len(way1) - 1]
+            for wayId2, way2 in relationWays.items():
+                if wayId1 == wayId2 or len(way2) < 1: continue
+                startNode2 = way2[0]
+                if endNode1 == startNode2:
+                    relationWays[wayId1] = way1 + way2[1:]
+                    del relationWays[wayId2]
+                    changed = True
+                    break
+
+            if changed: break
+        if not changed: break
+
+
+def generateGeoJSON(relationsList, additionalWayList):
+    def createFeatures(ways):
+        easifyWays(ways)
+        features = []
+
+        for wayId, way in ways.items():
+            if len(way) < 2: continue
+
+            startNode = way[0]
+            endNode = way[len(way) - 1]
+
+            # Start node equals end node
+            if startNode == endNode:
+                geometry = Polygon([way])
             else:
-                self.requiredNodes[n.ref] = [replaceInfo]
-            nodeIndex += 1
+                geometry = LineString(way)
 
-        self.wayCounter += 1
+            feature = Feature(id=wayId, geometry=geometry)
+            features.append(feature)
 
-    def relation(self, r):
-        if not 'admin_level' in r.tags: return
-        if not r.tags['admin_level'] == '8': return
-        print("relation")
+        return features
 
-
-class _NodeFinder(o.SimpleHandler):
-
-    def __init__(self, elements, requiredNodes):
-        super(_NodeFinder, self).__init__()
-        self.elements = elements
-        self.requiredNodes = requiredNodes
-
-    def node(self, n):
-        if n.id not in self.requiredNodes: return
-        replaceInfos = self.requiredNodes[n.id]
-
-        for replaceInfo in replaceInfos:
-            element = replaceInfo['element']
-
-            index = replaceInfo['index']
-            element['nodes'][index] = (n.location.lon, n.location.lat)
-
-
-def generateGeoJSON(elementsList):
     featureList = []
 
-    for element in elementsList:
-        nodesList = [node for node in element['nodes'] if node is not None]
+    for relationId, relation in relationsList.items():
+        relationFeatures = createFeatures(relation['ways'])
+        featureList.extend(relationFeatures)
 
-        if len(nodesList) < 2: continue
+    additionalWayFeatures = createFeatures(additionalWayList)
+    featureList.extend(additionalWayFeatures)
 
-        if element['type'] == 'way':
-            geometry = LineString(nodesList)
-            feature = Feature(id=element['id'], geometry=geometry)
-            featureList.append(feature)
+    print(f"Features: {len(featureList)}")
+    print(f"Features from relations: {len(featureList) - len(additionalWayFeatures)}")
+    print(f"Features from ways: {len(additionalWayFeatures)}")
 
     return FeatureCollection(featureList)
 
 
 def parsePBFFile(filePath):
-    ways = _AreaFilter()
-    ways.apply_file(filePath)
+    relationFilter = _RelationFilter()
+    relationFilter.apply_file(filePath)
 
-    print(f"Elements: {len(ways.elements)}")
-    print(f"Required nodes: {len(ways.requiredNodes)}")
+    print(f"Relations: {relationFilter.relationsNumber}")
 
-    nodeFinder = _NodeFinder(ways.elements, ways.requiredNodes)
-    nodeFinder.apply_file(filePath)
+    wayFilter = _WayFilter(relationFilter.relations, relationFilter.wayReplacements)
+    wayFilter.apply_file(filePath, locations=True)
 
-    jsonObject = generateGeoJSON(nodeFinder.elements)
-
+    jsonObject = generateGeoJSON(wayFilter.relations, wayFilter.additionalWays)
     return geojson.dumps(jsonObject, sort_keys=False)
