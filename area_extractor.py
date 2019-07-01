@@ -1,11 +1,9 @@
 import geojson
-import math
 import osmium as o
 
 from geojson import Point, LineString, Feature, FeatureCollection, Polygon
 
-DEBUG_RELATIONS_NUMBER = 1000
-
+DEBUG_RELATIONS_NUMBER = 100000
 
 class _RelationFilter(o.SimpleHandler):
 
@@ -14,12 +12,6 @@ class _RelationFilter(o.SimpleHandler):
         self.relations = {}
         self.wayReplacements = {}
         self.relationsNumber = 0
-
-    def way(self, w):
-        if 'type' not in w.tags: return
-        if not w.tags['type'] == 'boundary': return
-        if 'admin_level' not in w.tags: return
-        if not w.tags['admin_level'] == '8': return
 
     def relation(self, r):
         if self.relationsNumber >= DEBUG_RELATIONS_NUMBER: return
@@ -61,7 +53,8 @@ class _WayFilter(o.SimpleHandler):
         if w.id in self.wayReplacements:
             for i, relationId in enumerate(self.wayReplacements[w.id]):
                 self.relations[relationId]['ways'][w.id] = self.createCoordinatesList(w.nodes)
-        elif 'admin_level' in w.tags and w.tags['admin_level'] == '8':
+        elif 'type' in w.tags and w.tags['type'] == 'boundary' and 'admin_level' in w.tags \
+                and w.tags['admin_level'] == '8':
             self.additionalWays[w.id] = self.createCoordinatesList(w.nodes)
 
     def createCoordinatesList(self, wayNodes):
@@ -135,6 +128,7 @@ def generateGeoJSON(relationsList, additionalWayList):
 
 
 def parsePBFFile(filePath):
+
     relationFilter = _RelationFilter()
     relationFilter.apply_file(filePath)
 
